@@ -1,7 +1,7 @@
 # main.py - البوت الرئيسي
+# main.py - البوت الرئيسي
 import os
 import asyncio
-import json
 from telethon import TelegramClient, events
 from flask import Flask
 from threading import Thread
