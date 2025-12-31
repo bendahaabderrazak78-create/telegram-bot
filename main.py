@@ -1,289 +1,254 @@
-# main.py - البوت مع نظام تسجيل الدخول
-import os
 import asyncio
-import json
-from telethon import TelegramClient, events
-from flask import Flask
-from threading import Thread
+from telethon import TelegramClient, events, errors, Button
 
-# ==================== خادم ويب ====================
-app = Flask('')
+# ==========================================
+# ⚙️ CONFIGURATION
+# ==========================================
+API_ID = 33041609
+API_HASH = '5f731c160b3dd9465c4e75005633685e'
+BOT_TOKEN = '8492833920:AAGNDmi41iKOOVqIcsWHmw5XVO-w9oU7ybc'
 
-@app.route('/')
-def home():
-    return '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Telegram Bot</title>
-        <style>
-            body { font-family: Arial; text-align: center; padding: 50px; }
-            .status { color: green; font-size: 24px; }
-        </style>
-    </head>
-    <body>
-        <h1>🤖 Telegram Bot</h1>
-        <p class="status">✅ Status: Running with Login System</p>
-        <p>Free 24/7 Hosting on Koyeb</p>
-    </body>
-    </html>
-    '''
+SESSION_NAME = 'my_user_session'
+BOT_PASSWORD = "1234"  # 🔐 TON MOT DE PASSE
 
-def run_web():
-    app.run(host='0.0.0.0', port=8080)
+# ==========================================
+# 🔌 INITIALISATION
+# ==========================================
+bot = TelegramClient('bot_interface', API_ID, API_HASH)
+user_client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
-Thread(target=run_web, daemon=True).start()
+# Variables globales
+active_tasks = {}   # {chat_id: task}
+task_info = {}      # {chat_id: {'targets': [], 'count': 0}}
+allowed_users = set()
 
-# ==================== الإعدادات ====================
-API_ID = int(os.environ.get('API_ID', '33041609'))
-API_HASH = os.environ.get('API_HASH', '5f731c160b3dd9465c4e75005633685e')
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8492833920:AAGNDmi41iKOOVqIcsWHmw5XVO-w9oU7ybc')
+# ==========================================
+# 🛠️ UTILITAIRES (Menu & Sécurité)
+# ==========================================
 
-# ملف لحفظ بيانات المستخدمين
-USERS_FILE = 'users_data.json'
+def get_main_menu():
+    """Génère les boutons du menu principal."""
+    return [
+        [Button.inline("🔑 Connexion (Login)", data=b'login'), Button.inline("🚪 Déconnexion", data=b'logout')],
+        [Button.inline("🚀 Lancer Auto", data=b'auto'), Button.inline("🛑 Tout Arrêter", data=b'stop')],
+        [Button.inline("📊 VOIR STATUT", data=b'status')]
+    ]
 
-# ==================== نظام إدارة المستخدمين ====================
-class UserManager:
-    def __init__(self):
-        self.users_file = USERS_FILE
-        self.users = self.load_users()
-    
-    def load_users(self):
-        """تحميل بيانات المستخدمين"""
-        if os.path.exists(self.users_file):
-            try:
-                with open(self.users_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except:
-                return {}
-        return {}
-    
-    def save_users(self):
-        """حفظ بيانات المستخدمين"""
-        with open(self.users_file, 'w', encoding='utf-8') as f:
-            json.dump(self.users, f, ensure_ascii=False, indent=2)
-    
-    def add_user(self, user_id, phone, session_data=None):
-        """إضافة مستخدم جديد"""
-        user_id = str(user_id)
-        self.users[user_id] = {
-            'phone': phone,
-            'session': session_data,
-            'logged_in': session_data is not None,
-            'added_at': str(asyncio.get_event_loop().time())
-        }
-        self.save_users()
-    
-    def get_user(self, user_id):
-        """الحصول على بيانات مستخدم"""
-        return self.users.get(str(user_id))
-    
-    def is_logged_in(self, user_id):
-        """تحقق إذا كان المستخدم مسجل دخول"""
-        user = self.get_user(user_id)
-        return user and user.get('logged_in', False)
+async def check_access(event):
+    """Vérifie si l'utilisateur est autorisé."""
+    chat_id = event.chat_id
+    if chat_id not in allowed_users:
+        await event.respond("⛔ **Accès Refusé.**\nClique sur /start et entre le mot de passe.")
+        return False
+    return True
 
-user_manager = UserManager()
+# ==========================================
+# 🤖 1. DÉMARRAGE & MOT DE PASSE (/START)
+# ==========================================
+@bot.on(events.NewMessage(pattern='/start'))
+async def start_handler(event):
+    chat_id = event.chat_id
+    
+    # Verrouillage immédiat
+    allowed_users.discard(chat_id)
 
-# ==================== نظام البوت ====================
-async def main():
-    print("🚀 بدء تشغيل البوت مع نظام تسجيل الدخول...")
+    async with bot.conversation(chat_id) as conv:
+        # 1. Demande mot de passe
+        await conv.send_message("🔒 **BOT SÉCURISÉ**\nEntrez le mot de passe :")
+        try:
+            resp = await conv.get_response()
+            if resp.text.strip() == BOT_PASSWORD:
+                allowed_users.add(chat_id)
+                await conv.send_message("🔓 **Accès Autorisé !**", buttons=get_main_menu())
+            else:
+                await conv.send_message("❌ **Mot de passe faux.**")
+        except:
+            await conv.send_message("❌ Temps écoulé.")
+
+# ==========================================
+# 🖱️ GESTION DES BOUTONS (CALLBACKS)
+# ==========================================
+@bot.on(events.CallbackQuery)
+async def callback_handler(event):
+    chat_id = event.chat_id
     
-    # إنشاء مجلد الجلسات
-    os.makedirs('sessions', exist_ok=True)
-    
-    # تشغيل البوت
-    bot = await TelegramClient('sessions/bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
-    
-    # ==================== الأوامر ====================
-    
-    @bot.on(events.NewMessage(pattern='/start'))
-    async def start_handler(event):
-        user_id = event.sender_id
-        user = user_manager.get_user(user_id)
+    # Vérification sécurité
+    if chat_id not in allowed_users:
+        await event.answer("⛔ Non autorisé. Fais /start", alert=True)
+        return
+
+    data = event.data
+
+    # --- 📊 BOUTON STATUS ---
+    if data == b'status':
+        # Vérif User Client
+        is_connected = False
+        try:
+            if not user_client.is_connected(): await user_client.connect()
+            is_connected = await user_client.is_user_authorized()
+        except: pass
+
+        # Vérif Tâche
+        is_running = chat_id in active_tasks
+        info = task_info.get(chat_id, {})
+        nb_groups = len(info.get('targets', []))
         
-        if user and user.get('logged_in'):
-            await event.reply(f'''
-👋 **مرحباً بعودتك!**
+        status_msg = (
+            f"📊 **ÉTAT DU SYSTÈME**\n\n"
+            f"👤 **Compte User :** {'✅ Connecté' if is_connected else '❌ Déconnecté'}\n"
+            f"🔄 **Diffusion :** {'RUNNING 🏃' if is_running else 'STOPPED 💤'}\n"
+        )
+        if is_running:
+            status_msg += f"🎯 **Cibles :** {nb_groups} groupes\n"
 
-✅ **حسابك:** {user['phone']}
-🔹 **مسجل دخول منذ:** {user.get('added_at', 'غير معروف')}
+        await event.answer("Statut mis à jour !", alert=False)
+        await event.edit(status_msg, buttons=get_main_menu())
 
-📋 **الأوامر:**
-• /logout - تسجيل الخروج
-• /myinfo - معلومات حسابك
-• /send - إرسال رسالة
-• /status - حالة النظام
-            ''')
-        else:
-            await event.reply('''
-👋 **مرحباً بك في نظام تسجيل الدخول!**
+    # --- 🔑 BOUTON LOGIN ---
+    elif data == b'login':
+        await event.answer()
+        # Refresh connection
+        if user_client.is_connected(): await user_client.disconnect()
+        await user_client.connect()
 
-🔐 **لتسجيل دخول حسابك الشخصي:**
-1. اضغط /login
-2. أرسل رقم هاتفك
-3. أرسل كود التحقق
-
-📋 **الأوامر:**
-• /login - تسجيل دخول جديد
-• /help - المساعدة
-            ''')
-    
-    @bot.on(events.NewMessage(pattern='/login'))
-    async def login_handler(event):
-        user_id = event.sender_id
-        
-        # إذا كان مسجلاً دخولاً مسبقاً
-        if user_manager.is_logged_in(user_id):
-            await event.reply('✅ أنت مسجل دخول بالفعل! استخدم /logout أولاً.')
+        if await user_client.is_user_authorized():
+            await event.respond("✅ **Déjà connecté !**", buttons=get_main_menu())
             return
-        
-        async with bot.conversation(event.chat_id, timeout=300) as conv:
+
+        # On lance la conversation
+        async with bot.conversation(chat_id) as conv:
             try:
-                # طلب رقم الهاتف
-                await conv.send_message("📱 **أرسل رقم هاتفك مع رمز الدولة:**\nمثال: +213552959083")
-                phone_msg = await conv.get_response()
-                phone = phone_msg.text.strip()
-                
-                # إنشاء جلسة للمستخدم
-                session_file = f'sessions/user_{user_id}'
-                user_client = TelegramClient(session_file, API_ID, API_HASH)
-                await user_client.connect()
-                
-                # إرسال كود التحقق
-                await conv.send_message(f"⏳ جاري إرسال كود التحقق إلى {phone}...")
-                sent_code = await user_client.send_code_request(phone)
-                
-                # طلب الكود
-                await conv.send_message("🔢 **أرسل كود التحقق المكون من 5 أرقام:**")
-                code_msg = await conv.get_response()
-                code = code_msg.text.strip()
-                
-                # محاولة تسجيل الدخول
+                await conv.send_message("📱 **Entrez votre numéro** (ex: `+21355...`) :")
+                phone = (await conv.get_response()).text.strip().replace(" ", "")
+
+                await conv.send_message("⏳ Envoi du code...")
+                try:
+                    await user_client.send_code_request(phone)
+                except Exception as e:
+                    await conv.send_message(f"❌ Erreur : {e}", buttons=get_main_menu())
+                    return
+
+                await conv.send_message("📩 **Entrez le code reçu** sur Telegram :")
+                code = (await conv.get_response()).text.strip()
+
                 try:
                     await user_client.sign_in(phone, code)
-                    await conv.send_message("✅ **تم تسجيل الدخول بنجاح!**")
-                    
-                    # حفظ بيانات المستخدم
-                    user_manager.add_user(user_id, phone, 'session_active')
-                    
-                    # الحصول على معلومات الحساب
-                    me = await user_client.get_me()
-                    await conv.send_message(f'''
-📊 **معلومات حسابك:**
-
-👤 **الاسم:** {me.first_name} {me.last_name or ""}
-📞 **الهاتف:** {me.phone}
-🆔 **ID:** {me.id}
-                    ''')
-                    
+                except errors.SessionPasswordNeededError:
+                    await conv.send_message("🔐 **Mot de passe 2FA** requis :")
+                    pwd = (await conv.get_response()).text
+                    await user_client.sign_in(password=pwd)
                 except Exception as e:
-                    if "two step" in str(e).lower():
-                        await conv.send_message("🔐 **هذا الحساب يحتاج كلمة مرور ثنائية:**")
-                        password_msg = await conv.get_response()
-                        await user_client.sign_in(password=password_msg.text)
-                        await conv.send_message("✅ **تم التسجيل مع التحقق الثنائي!**")
-                        user_manager.add_user(user_id, phone, 'session_active')
-                    else:
-                        await conv.send_message(f"❌ **فشل تسجيل الدخول:** {str(e)}")
+                    await conv.send_message(f"❌ Erreur connexion : {e}", buttons=get_main_menu())
+                    return
                 
-                await user_client.disconnect()
-                
+                me = await user_client.get_me()
+                await conv.send_message(f"🎉 **Succès !** Connecté en tant que {me.first_name}", buttons=get_main_menu())
+
             except asyncio.TimeoutError:
-                await event.reply("⏰ انتهت المهلة، حاول /login مرة أخرى")
-            except Exception as e:
-                await event.reply(f"❌ **حدث خطأ:** {str(e)}")
-    
-    @bot.on(events.NewMessage(pattern='/logout'))
-    async def logout_handler(event):
-        user_id = event.sender_id
-        
-        if user_manager.is_logged_in(user_id):
-            # حذف ملف الجلسة
-            session_file = f'sessions/user_{user_id}.session'
-            if os.path.exists(session_file):
-                os.remove(session_file)
-            
-            # تحديث بيانات المستخدم
-            user = user_manager.get_user(user_id)
-            if user:
-                user['logged_in'] = False
-                user_manager.save_users()
-            
-            await event.reply("✅ **تم تسجيل الخروج بنجاح!**")
-        else:
-            await event.reply("❌ **أنت غير مسجل دخول!**")
-    
-    @bot.on(events.NewMessage(pattern='/myinfo'))
-    async def myinfo_handler(event):
-        user_id = event.sender_id
-        user = user_manager.get_user(user_id)
-        
-        if user and user.get('logged_in'):
-            await event.reply(f'''
-📊 **معلومات حسابك:**
+                await conv.send_message("❌ Trop lent.", buttons=get_main_menu())
 
-📞 **الهاتف:** {user['phone']}
-🔐 **الحالة:** ✅ مسجل دخول
-📅 **تم الإضافة:** {user.get('added_at', 'غير معروف')}
-👥 **المستخدمين المسجلين:** {len(user_manager.users)}
-            ''')
-        else:
-            await event.reply("❌ **أنت غير مسجل دخول! استخدم /login أولاً.**")
-    
-    @bot.on(events.NewMessage(pattern='/send'))
-    async def send_handler(event):
-        user_id = event.sender_id
+    # --- 🚪 BOUTON LOGOUT ---
+    elif data == b'logout':
+        if not user_client.is_connected(): await user_client.connect()
         
-        if not user_manager.is_logged_in(user_id):
-            await event.reply("❌ **يجب تسجيل الدخول أولاً! استخدم /login**")
+        if not await user_client.is_user_authorized():
+            await event.answer("⚠️ Déjà déconnecté", alert=True)
             return
+
+        # Stop task si existe
+        if chat_id in active_tasks:
+            active_tasks[chat_id].cancel()
+            del active_tasks[chat_id]
+
+        await user_client.log_out()
+        await user_client.disconnect()
+        await event.edit("👋 **Déconnecté avec succès.**", buttons=get_main_menu())
+
+    # --- 🚀 BOUTON AUTO ---
+    elif data == b'auto':
+        await event.answer()
         
-        await event.reply("📨 **ميزة الإرسال قريباً...**\n(سيتم إضافتها في التحديث القادم)")
-    
-    @bot.on(events.NewMessage(pattern='/status'))
-    async def status_handler(event):
-        await event.reply(f'''
-📊 **حالة النظام:**
+        if chat_id in active_tasks:
+            await event.respond("⚠️ **Une diffusion est déjà en cours !**\nUtilisez STOP d'abord.", buttons=get_main_menu())
+            return
 
-✅ **البوت:** نشط
-👥 **المستخدمون:** {len(user_manager.users)} مسجلين
-🔐 **المسجلون دخولاً:** {sum(1 for u in user_manager.users.values() if u.get('logged_in'))}
-⚡ **المطور:** Abderrazak
-        ''')
-    
-    @bot.on(events.NewMessage(pattern='/help'))
-    async def help_handler(event):
-        await event.reply('''
-📚 **قائمة الأوامر:**
+        if not user_client.is_connected(): await user_client.connect()
+        if not await user_client.is_user_authorized():
+            await event.respond("❌ **Vous n'êtes pas connecté.**\nCliquez sur 'Connexion' d'abord.", buttons=get_main_menu())
+            return
 
-🔐 **التسجيل:**
-• /login - تسجيل دخول حسابك
-• /logout - تسجيل الخروج
-• /myinfo - معلومات حسابك
+        async with bot.conversation(chat_id) as conv:
+            try:
+                await conv.send_message("🔗 **Envoyez la liste des groupes** (séparés par espace ou ligne) :")
+                resp = await conv.get_response()
+                targets = [t.strip() for t in resp.text.replace("\n", " ").split(" ") if t.strip()]
 
-🔧 **عامة:**
-• /start - بدء البوت
-• /status - حالة النظام
-• /help - هذه المساعدة
+                if not targets:
+                    await conv.send_message("❌ Liste vide.", buttons=get_main_menu())
+                    return
 
-📨 **الإرسال:**
-• /send - إرسال رسالة (قريباً)
-        ''')
-    
-    # ==================== بدء التشغيل ====================
-    bot_info = await bot.get_me()
-    print(f"✅ البوت يعمل: @{bot_info.username}")
-    print(f"🔗 رابط البوت: https://t.me/{bot_info.username}")
-    print(f"👥 المستخدمون المسجلون: {len(user_manager.users)}")
-    
-    print("\n" + "="*50)
-    print("🎉 **نظام تسجيل الدخول جاهز!**")
-    print("="*50)
-    
-    # إبقاء البوت يعمل
+                await conv.send_message("📝 **Envoyez le MESSAGE** à diffuser :")
+                msg = (await conv.get_response()).text
+
+                await conv.send_message("⏱️ **Temps d'attente** (en secondes) entre chaque cycle :")
+                resp_t = await conv.get_response()
+                if not resp_t.text.isdigit():
+                    await conv.send_message("❌ Erreur: Chiffre requis.", buttons=get_main_menu())
+                    return
+                interval = int(resp_t.text)
+
+                await conv.send_message(f"🚀 **Lancement sur {len(targets)} groupes !**", buttons=get_main_menu())
+                
+                # Sauvegarde info et lancement
+                task_info[chat_id] = {'targets': targets}
+                task = bot.loop.create_task(send_loop(targets, msg, interval, chat_id))
+                active_tasks[chat_id] = task
+
+            except Exception as e:
+                await conv.send_message(f"❌ Erreur : {e}", buttons=get_main_menu())
+
+    # --- 🛑 BOUTON STOP ---
+    elif data == b'stop':
+        if chat_id in active_tasks:
+            active_tasks[chat_id].cancel()
+            del active_tasks[chat_id]
+            if chat_id in task_info: del task_info[chat_id]
+            await event.answer("Arrêt effectué !", alert=True)
+            await event.edit("🛑 **Diffusion ARRÊTÉE.**", buttons=get_main_menu())
+        else:
+            await event.answer("Aucune tâche en cours.", alert=True)
+
+# ==========================================
+# 🔄 BOUCLE D'ENVOI (Back-end)
+# ==========================================
+async def send_loop(targets, message, interval, chat_id):
+    try:
+        while True:
+            for group in targets:
+                try:
+                    await user_client.send_message(group, message)
+                    await asyncio.sleep(3) # Anti-flood pause
+                except Exception as e:
+                    print(f"Erreur envoi {group}: {e}")
+            
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        if chat_id in active_tasks: del active_tasks[chat_id]
+        try: await bot.send_message(chat_id, f"❌ Erreur critique boucle : {e}")
+        except: pass
+
+# ==========================================
+# 🏁 MAIN
+# ==========================================
+async def main():
+    print(f"🔐 Bot à Boutons en ligne... (Pass: {BOT_PASSWORD})")
+    await bot.start(bot_token=BOT_TOKEN)
+    try: await user_client.connect()
+    except: pass
     await bot.run_until_disconnected()
 
-# ==================== التشغيل الرئيسي ====================
 if __name__ == '__main__':
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
