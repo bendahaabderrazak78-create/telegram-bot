@@ -2,12 +2,13 @@ import os
 import asyncio
 import threading
 import logging
+import time
 from flask import Flask
 from telethon import TelegramClient, events, Button, errors
 from telethon.sessions import StringSession
 
 # ==========================================
-# 📝 LOGGING (POUR VOIR LES ERREURS)
+# 📝 LOGGING
 # ==========================================
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,13 +23,12 @@ def home():
     return "✅ Bot en ligne ! (Status: 200 OK)"
 
 def run_web_server():
-    # Koyeb utilise souvent le port 8080 par défaut
     port = int(os.environ.get("PORT", 8080))
-    print(f"🌍 Serveur Web démarré sur le port {port}")
+    print(f"🌍 Web Server running on port {port}")
     try:
         app.run(host='0.0.0.0', port=port)
     except Exception as e:
-        print(f"❌ Erreur Web Server: {e}")
+        print(f"❌ Web Server Error: {e}")
 
 # ==========================================
 # ⚙️ CONFIGURATION
@@ -40,21 +40,19 @@ BOT_PASSWORD = os.getenv("BOT_PASSWORD", "1234")
 SAVED_SESSION = os.getenv("STRING_SESSION")
 
 # ==========================================
-# 🔌 INITIALISATION CLIENTS
+# 🔌 INITIALISATION (SANS START IMMÉDIAT)
 # ==========================================
-print("🔄 Initialisation des clients Telegram...")
-bot = TelegramClient('bot_session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+# On crée l'objet mais on ne le démarre pas tout de suite pour éviter le crash
+bot = TelegramClient('bot_session', API_ID, API_HASH)
 
+# Initialisation du client utilisateur (Toi)
 user_client = None
 if SAVED_SESSION:
     try:
         user_client = TelegramClient(StringSession(SAVED_SESSION), API_ID, API_HASH)
-        print("✅ StringSession détectée.")
-    except Exception as e:
-        print(f"⚠️ Erreur StringSession (Session ignorée) : {e}")
+    except:
         user_client = TelegramClient(StringSession(), API_ID, API_HASH)
 else:
-    print("⚠️ Aucune StringSession trouvée. Mode temporaire.")
     user_client = TelegramClient(StringSession(), API_ID, API_HASH)
 
 active_tasks = {}
@@ -94,7 +92,6 @@ async def callback_handler(event):
         return
     data = event.data
 
-    # --- STATUS ---
     if data == b'status':
         is_connected = False
         try:
@@ -105,15 +102,12 @@ async def callback_handler(event):
         msg = f"📊 **STATUT**\n👤 Compte : {'✅ Connecté' if is_connected else '❌ Déconnecté'}\n🔄 Auto : {'RUNNING 🏃' if is_running else 'STOPPED 💤'}"
         await event.edit(msg, buttons=get_main_menu())
 
-    # --- LOGIN ---
     elif data == b'login':
         await event.answer()
         try:
             if not user_client.is_connected(): await user_client.connect()
-        except Exception as e:
-            await event.respond(f"❌ Erreur connexion client: {e}", buttons=get_main_menu())
-            return
-
+        except: pass
+        
         if await user_client.is_user_authorized():
             await event.respond("✅ Déjà connecté !", buttons=get_main_menu())
             return
@@ -124,6 +118,9 @@ async def callback_handler(event):
                 phone = (await conv.get_response()).text.strip().replace(" ", "")
                 await conv.send_message("⏳ Envoi code...")
                 try: await user_client.send_code_request(phone)
+                except errors.FloodWaitError as e:
+                    await conv.send_message(f"❌ Trop de tentatives. Attends {e.seconds}s.", buttons=get_main_menu())
+                    return
                 except Exception as e: 
                     await conv.send_message(f"❌ Erreur : {e}", buttons=get_main_menu())
                     return
@@ -148,7 +145,6 @@ async def callback_handler(event):
             except asyncio.TimeoutError:
                 await conv.send_message("❌ Trop lent.", buttons=get_main_menu())
 
-    # --- LOGOUT ---
     elif data == b'logout':
         if not user_client.is_connected(): await user_client.connect()
         if await user_client.is_user_authorized():
@@ -158,7 +154,6 @@ async def callback_handler(event):
         else:
             await event.answer("Déjà fait.", alert=True)
 
-    # --- AUTO ---
     elif data == b'auto':
         await event.answer()
         if chat_id in active_tasks:
@@ -193,7 +188,6 @@ async def callback_handler(event):
             active_tasks[chat_id] = task
             await conv.send_message("🚀 **C'est parti !**", buttons=get_main_menu())
 
-    # --- STOP ---
     elif data == b'stop':
         if chat_id in active_tasks:
             active_tasks[chat_id].cancel()
@@ -217,25 +211,44 @@ async def send_loop(targets, message, interval, chat_id):
         if chat_id in active_tasks: del active_tasks[chat_id]
 
 # ==========================================
-# 🚀 MAIN (DÉMARRAGE ROBUSTE)
+# 🚀 MAIN (GESTION ERREURS STARTUP)
 # ==========================================
+async def start_bot_safely():
+    """Tente de démarrer le bot en gérant le FloodWaitError"""
+    print("🔄 Tentative de connexion du Bot...")
+    while True:
+        try:
+            await bot.start(bot_token=BOT_TOKEN)
+            print("✅ Bot Telegram connecté avec succès !")
+            break
+        except errors.FloodWaitError as e:
+            print(f"⚠️ FLOOD WAIT DÉTECTÉ : Telegram demande d'attendre {e.seconds} secondes.")
+            print("💤 Le script va dormir pour respecter la limite...")
+            await asyncio.sleep(e.seconds + 5) # On attend le temps demandé + 5 sec de sécurité
+            print("🔄 Reprise de la tentative de connexion...")
+        except Exception as e:
+            print(f"❌ Erreur critique au démarrage : {e}")
+            await asyncio.sleep(10) # Pause avant de retenter
+
 if __name__ == '__main__':
-    print("🚀 Démarrage du script...")
+    print("🚀 Démarrage du système...")
     
-    # 1. Lancer le serveur Web (Thread)
+    # 1. Web Server
     try:
         server_thread = threading.Thread(target=run_web_server)
         server_thread.daemon = True
         server_thread.start()
-        print("✅ Thread Web Server lancé.")
     except Exception as e:
-        print(f"❌ Echec lancement Web Server: {e}")
+        print(f"❌ Web Server Error: {e}")
 
-    # 2. Lancer la boucle principale Telegram
+    # 2. Telegram Bot avec Anti-Crash
+    loop = asyncio.get_event_loop()
     try:
-        loop = asyncio.get_event_loop()
+        # On démarre le bot d'abord
+        loop.run_until_complete(start_bot_safely())
+        # Puis on le laisse tourner
         loop.run_until_complete(bot.run_until_disconnected())
     except KeyboardInterrupt:
         print("🛑 Arrêt manuel.")
     except Exception as e:
-        print(f"❌ CRASH DU BOT : {e}")
+        print(f"❌ Crash final : {e}")
