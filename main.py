@@ -3,6 +3,7 @@ import asyncio
 import threading
 import logging
 import time
+import requests # مكتبة جديدة للإيقاظ
 from flask import Flask
 from telethon import TelegramClient, events, Button, errors
 from telethon.sessions import StringSession
@@ -14,21 +15,37 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # ==========================================
-# 🌐 SERVEUR WEB (KEEP ALIVE KOYEB)
+# 🌐 SERVEUR WEB (KEEP ALIVE)
 # ==========================================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Bot en ligne et en attente (FloodWait géré) !"
+    return "✅ I AM ALIVE! Bot is running."
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
-    print(f"🌍 Web Server running on port {port}")
     try:
         app.run(host='0.0.0.0', port=port)
     except Exception as e:
         print(f"❌ Web Server Error: {e}")
+
+# 🔥 وظيفـة الإيقاظ الذاتي (جديدة)
+def keep_alive_ping():
+    """يقوم بنكز السيرفر كل 5 دقائق لكي لا ينام"""
+    port = int(os.environ.get("PORT", 8080))
+    # إذا كنت تعرف رابط تطبيقك على Koyeb ضعه هنا بدلاً من localhost
+    # مثال: url = "https://my-app-name.koyeb.app"
+    url = f"http://127.0.0.1:{port}" 
+    
+    print(f"⏰ نظام الإيقاظ الذاتي يعمل... الهدف: {url}")
+    while True:
+        time.sleep(300) # كل 5 دقائق
+        try:
+            response = requests.get(url)
+            print(f"✅ Ping sent: {response.status_code}")
+        except Exception as e:
+            print(f"⚠️ Ping failed: {e}")
 
 # ==========================================
 # ⚙️ CONFIGURATION
@@ -117,7 +134,7 @@ async def callback_handler(event):
                 await conv.send_message("⏳ Envoi code...")
                 try: await user_client.send_code_request(phone)
                 except errors.FloodWaitError as e:
-                    await conv.send_message(f"❌ Trop de tentatives. Attends {e.seconds}s.", buttons=get_main_menu())
+                    await conv.send_message(f"❌ FloodWait: Attends {e.seconds}s.", buttons=get_main_menu())
                     return
                 except Exception as e: 
                     await conv.send_message(f"❌ Erreur : {e}", buttons=get_main_menu())
@@ -137,7 +154,7 @@ async def callback_handler(event):
 
                 session_string = user_client.session.save()
                 await conv.send_message(
-                    f"🎉 **Connecté !**\n⚠️ **COPIE CE CODE DANS KOYEB (VAR: STRING_SESSION)** :\n\n`{session_string}`",
+                    f"🎉 **Connecté !**\n⚠️ **STRING_SESSION (Koyeb)** :\n\n`{session_string}`",
                     buttons=get_main_menu()
                 )
             except asyncio.TimeoutError:
@@ -212,48 +229,35 @@ async def send_loop(targets, message, interval, chat_id):
 # 🚀 GESTION INTELLIGENTE DU DÉMARRAGE
 # ==========================================
 async def start_bot_safely():
-    """Tente de démarrer le bot en affichant le compte à rebours"""
     print("🔄 Connexion à Telegram...")
     while True:
         try:
             await bot.start(bot_token=BOT_TOKEN)
-            print("✅ SUCCÈS : Bot Telegram connecté et en ligne !")
+            print("✅ SUCCÈS : Bot en ligne !")
             break
         except errors.FloodWaitError as e:
             wait_time = e.seconds
-            print(f"⚠️ PROTECTION TELEGRAM ACTIVÉE")
-            print(f"⏳ Il faut attendre {wait_time} secondes...")
-            
-            # Compte à rebours visuel
+            print(f"⚠️ PROTECTION TELEGRAM: Attente de {wait_time}s...")
             while wait_time > 0:
-                if wait_time % 10 == 0: # Affiche tous les 10 sec
-                    print(f"💤 Reste {wait_time} secondes...")
                 await asyncio.sleep(1)
                 wait_time -= 1
-            
-            print("🔄 Fin de l'attente, nouvelle tentative...")
         except Exception as e:
-            print(f"❌ Erreur critique : {e}")
+            print(f"❌ Erreur : {e}")
             await asyncio.sleep(10)
 
 if __name__ == '__main__':
-    print("🚀 Démarrage du système...")
+    print("🚀 Démarrage...")
     
     # 1. Web Server
-    try:
-        server_thread = threading.Thread(target=run_web_server)
-        server_thread.daemon = True
-        server_thread.start()
-    except Exception as e:
-        print(f"❌ Web Server Error: {e}")
+    threading.Thread(target=run_web_server, daemon=True).start()
+    
+    # 2. Keep Alive Pinger (Nouveau!)
+    threading.Thread(target=keep_alive_ping, daemon=True).start()
 
-    # 2. Telegram Bot
+    # 3. Bot
     try:
-        loop = asyncio.new_event_loop() # Correction DeprecationWarning
+        loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(start_bot_safely())
         loop.run_until_complete(bot.run_until_disconnected())
-    except KeyboardInterrupt:
-        print("🛑 Arrêt manuel.")
-    except Exception as e:
-        print(f"❌ Crash final : {e}")
+    except KeyboardInterrupt: pass
