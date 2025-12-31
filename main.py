@@ -20,7 +20,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Bot en ligne ! (Status: 200 OK)"
+    return "✅ Bot en ligne et en attente (FloodWait géré) !"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
@@ -40,12 +40,10 @@ BOT_PASSWORD = os.getenv("BOT_PASSWORD", "1234")
 SAVED_SESSION = os.getenv("STRING_SESSION")
 
 # ==========================================
-# 🔌 INITIALISATION (SANS START IMMÉDIAT)
+# 🔌 INITIALISATION
 # ==========================================
-# On crée l'objet mais on ne le démarre pas tout de suite pour éviter le crash
 bot = TelegramClient('bot_session', API_ID, API_HASH)
 
-# Initialisation du client utilisateur (Toi)
 user_client = None
 if SAVED_SESSION:
     try:
@@ -211,24 +209,32 @@ async def send_loop(targets, message, interval, chat_id):
         if chat_id in active_tasks: del active_tasks[chat_id]
 
 # ==========================================
-# 🚀 MAIN (GESTION ERREURS STARTUP)
+# 🚀 GESTION INTELLIGENTE DU DÉMARRAGE
 # ==========================================
 async def start_bot_safely():
-    """Tente de démarrer le bot en gérant le FloodWaitError"""
-    print("🔄 Tentative de connexion du Bot...")
+    """Tente de démarrer le bot en affichant le compte à rebours"""
+    print("🔄 Connexion à Telegram...")
     while True:
         try:
             await bot.start(bot_token=BOT_TOKEN)
-            print("✅ Bot Telegram connecté avec succès !")
+            print("✅ SUCCÈS : Bot Telegram connecté et en ligne !")
             break
         except errors.FloodWaitError as e:
-            print(f"⚠️ FLOOD WAIT DÉTECTÉ : Telegram demande d'attendre {e.seconds} secondes.")
-            print("💤 Le script va dormir pour respecter la limite...")
-            await asyncio.sleep(e.seconds + 5) # On attend le temps demandé + 5 sec de sécurité
-            print("🔄 Reprise de la tentative de connexion...")
+            wait_time = e.seconds
+            print(f"⚠️ PROTECTION TELEGRAM ACTIVÉE")
+            print(f"⏳ Il faut attendre {wait_time} secondes...")
+            
+            # Compte à rebours visuel
+            while wait_time > 0:
+                if wait_time % 10 == 0: # Affiche tous les 10 sec
+                    print(f"💤 Reste {wait_time} secondes...")
+                await asyncio.sleep(1)
+                wait_time -= 1
+            
+            print("🔄 Fin de l'attente, nouvelle tentative...")
         except Exception as e:
-            print(f"❌ Erreur critique au démarrage : {e}")
-            await asyncio.sleep(10) # Pause avant de retenter
+            print(f"❌ Erreur critique : {e}")
+            await asyncio.sleep(10)
 
 if __name__ == '__main__':
     print("🚀 Démarrage du système...")
@@ -241,12 +247,11 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"❌ Web Server Error: {e}")
 
-    # 2. Telegram Bot avec Anti-Crash
-    loop = asyncio.get_event_loop()
+    # 2. Telegram Bot
     try:
-        # On démarre le bot d'abord
+        loop = asyncio.new_event_loop() # Correction DeprecationWarning
+        asyncio.set_event_loop(loop)
         loop.run_until_complete(start_bot_safely())
-        # Puis on le laisse tourner
         loop.run_until_complete(bot.run_until_disconnected())
     except KeyboardInterrupt:
         print("🛑 Arrêt manuel.")
