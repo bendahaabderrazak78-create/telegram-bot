@@ -1,225 +1,160 @@
+import os
 import asyncio
-from telethon import TelegramClient, events, errors, Button
+from telethon import TelegramClient, events, Button
+from telethon.sessions import StringSession
 
 # ==========================================
 # ⚙️ CONFIGURATION
 # ==========================================
-API_ID = 33041609
-API_HASH = '5f731c160b3dd9465c4e75005633685e'
-BOT_TOKEN = '8492833920:AAGNDmi41iKOOVqIcsWHmw5XVO-w9oU7ybc'
+# Le code cherche d'abord dans Koyeb (os.getenv). 
+# S'il ne trouve pas, il utilise tes valeurs par défaut ci-dessous.
 
-SESSION_NAME = 'my_user_session'
-BOT_PASSWORD = "1234"  # 🔐 TON MOT DE PASSE
+API_ID = int(os.getenv("API_ID", 33041609))
+API_HASH = os.getenv("API_HASH", "5f731c160b3dd9465c4e75005633685e")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8492833920:AAGNDmi41iKOOVqIcsWHmw5XVO-w9oU7ybc")
+BOT_PASSWORD = os.getenv("BOT_PASSWORD", "1234")
+
+# ⚠️ IMPORTANT : Sur Koyeb, cette variable doit être définie dans les Settings.
+# Sinon, le bot ne pourra pas se connecter à ton compte perso.
+STRING_SESSION = os.getenv("STRING_SESSION") 
 
 # ==========================================
 # 🔌 INITIALISATION
 # ==========================================
-bot = TelegramClient('bot_interface', API_ID, API_HASH)
-user_client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
-# Variables globales
-active_tasks = {}   # {chat_id: task}
-task_info = {}      # {chat_id: {'targets': [], 'count': 0}}
+# 1. Connexion au Bot (Interface)
+bot = TelegramClient('bot_session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+
+# 2. Connexion au Compte Utilisateur (Celui qui envoie)
+if STRING_SESSION:
+    # Mode Cloud (Koyeb/GitHub)
+    user_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
+else:
+    # Mode Local (Test sur PC sans StringSession) - Moins fiable sur Koyeb
+    print("⚠️ ATTENTION : Pas de STRING_SESSION détectée. Le bot risque de demander le code à chaque redémarrage.")
+    user_client = TelegramClient('user_session', API_ID, API_HASH)
+
+# Variables de gestion
+active_tasks = {}
 allowed_users = set()
 
 # ==========================================
-# 🛠️ UTILITAIRES (Menu & Sécurité)
+# 🛠️ FONCTIONS UTILITAIRES
 # ==========================================
-
 def get_main_menu():
-    """Génère les boutons du menu principal."""
+    """Boutons du menu principal"""
     return [
-        [Button.inline("🔑 Connexion (Login)", data=b'login'), Button.inline("🚪 Déconnexion", data=b'logout')],
         [Button.inline("🚀 Lancer Auto", data=b'auto'), Button.inline("🛑 Tout Arrêter", data=b'stop')],
         [Button.inline("📊 VOIR STATUT", data=b'status')]
     ]
 
-async def check_access(event):
-    """Vérifie si l'utilisateur est autorisé."""
-    chat_id = event.chat_id
-    if chat_id not in allowed_users:
-        await event.respond("⛔ **Accès Refusé.**\nClique sur /start et entre le mot de passe.")
-        return False
-    return True
-
 # ==========================================
-# 🤖 1. DÉMARRAGE & MOT DE PASSE (/START)
+# 🤖 COMMANDES (START & MENU)
 # ==========================================
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
     chat_id = event.chat_id
-    
-    # Verrouillage immédiat
+    # On verrouille l'utilisateur pour forcer le mot de passe
     allowed_users.discard(chat_id)
-
+    
     async with bot.conversation(chat_id) as conv:
-        # 1. Demande mot de passe
-        await conv.send_message("🔒 **BOT SÉCURISÉ**\nEntrez le mot de passe :")
+        await conv.send_message("🔒 **SÉCURITÉ**\nEntrez le mot de passe :")
         try:
             resp = await conv.get_response()
             if resp.text.strip() == BOT_PASSWORD:
                 allowed_users.add(chat_id)
                 await conv.send_message("🔓 **Accès Autorisé !**", buttons=get_main_menu())
             else:
-                await conv.send_message("❌ **Mot de passe faux.**")
+                await conv.send_message("❌ Mot de passe incorrect.")
         except:
             await conv.send_message("❌ Temps écoulé.")
 
 # ==========================================
-# 🖱️ GESTION DES BOUTONS (CALLBACKS)
+# 🖱️ GESTION DES CLICS (CALLBACKS)
 # ==========================================
 @bot.on(events.CallbackQuery)
 async def callback_handler(event):
     chat_id = event.chat_id
-    
-    # Vérification sécurité
     if chat_id not in allowed_users:
-        await event.answer("⛔ Non autorisé. Fais /start", alert=True)
+        await event.answer("⛔ Fais /start d'abord", alert=True)
         return
 
     data = event.data
 
-    # --- 📊 BOUTON STATUS ---
+    # --- 📊 STATUT ---
     if data == b'status':
-        # Vérif User Client
         is_connected = False
         try:
-            if not user_client.is_connected(): await user_client.connect()
+            # On tente de connecter le client user s'il ne l'est pas
+            if not user_client.is_connected():
+                await user_client.connect()
             is_connected = await user_client.is_user_authorized()
         except: pass
 
-        # Vérif Tâche
         is_running = chat_id in active_tasks
-        info = task_info.get(chat_id, {})
-        nb_groups = len(info.get('targets', []))
         
-        status_msg = (
-            f"📊 **ÉTAT DU SYSTÈME**\n\n"
-            f"👤 **Compte User :** {'✅ Connecté' if is_connected else '❌ Déconnecté'}\n"
-            f"🔄 **Diffusion :** {'RUNNING 🏃' if is_running else 'STOPPED 💤'}\n"
+        msg = (
+            f"📊 **ÉTAT DU BOT**\n\n"
+            f"👤 Compte Perso : {'✅ Connecté' if is_connected else '❌ Déconnecté (Ajoute STRING_SESSION)'}\n"
+            f"🔄 Diffusion : {'EN COURS 🏃' if is_running else 'ARRÊTÉE 💤'}"
         )
-        if is_running:
-            status_msg += f"🎯 **Cibles :** {nb_groups} groupes\n"
+        await event.edit(msg, buttons=get_main_menu())
 
-        await event.answer("Statut mis à jour !", alert=False)
-        await event.edit(status_msg, buttons=get_main_menu())
-
-    # --- 🔑 BOUTON LOGIN ---
-    elif data == b'login':
-        await event.answer()
-        # Refresh connection
-        if user_client.is_connected(): await user_client.disconnect()
-        await user_client.connect()
-
-        if await user_client.is_user_authorized():
-            await event.respond("✅ **Déjà connecté !**", buttons=get_main_menu())
-            return
-
-        # On lance la conversation
-        async with bot.conversation(chat_id) as conv:
-            try:
-                await conv.send_message("📱 **Entrez votre numéro** (ex: `+21355...`) :")
-                phone = (await conv.get_response()).text.strip().replace(" ", "")
-
-                await conv.send_message("⏳ Envoi du code...")
-                try:
-                    await user_client.send_code_request(phone)
-                except Exception as e:
-                    await conv.send_message(f"❌ Erreur : {e}", buttons=get_main_menu())
-                    return
-
-                await conv.send_message("📩 **Entrez le code reçu** sur Telegram :")
-                code = (await conv.get_response()).text.strip()
-
-                try:
-                    await user_client.sign_in(phone, code)
-                except errors.SessionPasswordNeededError:
-                    await conv.send_message("🔐 **Mot de passe 2FA** requis :")
-                    pwd = (await conv.get_response()).text
-                    await user_client.sign_in(password=pwd)
-                except Exception as e:
-                    await conv.send_message(f"❌ Erreur connexion : {e}", buttons=get_main_menu())
-                    return
-                
-                me = await user_client.get_me()
-                await conv.send_message(f"🎉 **Succès !** Connecté en tant que {me.first_name}", buttons=get_main_menu())
-
-            except asyncio.TimeoutError:
-                await conv.send_message("❌ Trop lent.", buttons=get_main_menu())
-
-    # --- 🚪 BOUTON LOGOUT ---
-    elif data == b'logout':
-        if not user_client.is_connected(): await user_client.connect()
-        
-        if not await user_client.is_user_authorized():
-            await event.answer("⚠️ Déjà déconnecté", alert=True)
-            return
-
-        # Stop task si existe
-        if chat_id in active_tasks:
-            active_tasks[chat_id].cancel()
-            del active_tasks[chat_id]
-
-        await user_client.log_out()
-        await user_client.disconnect()
-        await event.edit("👋 **Déconnecté avec succès.**", buttons=get_main_menu())
-
-    # --- 🚀 BOUTON AUTO ---
+    # --- 🚀 AUTO ---
     elif data == b'auto':
         await event.answer()
         
         if chat_id in active_tasks:
-            await event.respond("⚠️ **Une diffusion est déjà en cours !**\nUtilisez STOP d'abord.", buttons=get_main_menu())
+            await event.respond("⚠️ Déjà en cours !", buttons=get_main_menu())
             return
 
-        if not user_client.is_connected(): await user_client.connect()
-        if not await user_client.is_user_authorized():
-            await event.respond("❌ **Vous n'êtes pas connecté.**\nCliquez sur 'Connexion' d'abord.", buttons=get_main_menu())
+        # Vérification connexion
+        try:
+            await user_client.connect()
+            if not await user_client.is_user_authorized():
+                await event.respond("❌ **Erreur Compte !**\nLe compte utilisateur n'est pas connecté.\nAjoute la variable `STRING_SESSION` dans Koyeb.", buttons=get_main_menu())
+                return
+        except Exception as e:
+            await event.respond(f"❌ Erreur technique : {e}")
             return
 
         async with bot.conversation(chat_id) as conv:
+            await conv.send_message("🔗 **Liste des Groupes** (séparés par espace ou saut de ligne) :")
+            resp = await conv.get_response()
+            targets = resp.text.split()
+
+            if not targets:
+                await conv.send_message("❌ Liste vide.", buttons=get_main_menu())
+                return
+
+            await conv.send_message("📝 **Message** à envoyer :")
+            msg_text = (await conv.get_response()).text
+
+            await conv.send_message("⏱️ **Pause** entre les cycles (en secondes) :")
             try:
-                await conv.send_message("🔗 **Envoyez la liste des groupes** (séparés par espace ou ligne) :")
-                resp = await conv.get_response()
-                targets = [t.strip() for t in resp.text.replace("\n", " ").split(" ") if t.strip()]
+                interval = int((await conv.get_response()).text)
+            except:
+                await conv.send_message("❌ Il faut un nombre.", buttons=get_main_menu())
+                return
 
-                if not targets:
-                    await conv.send_message("❌ Liste vide.", buttons=get_main_menu())
-                    return
+            await conv.send_message(f"🚀 **Lancement sur {len(targets)} groupes !**", buttons=get_main_menu())
+            
+            # Lancement tâche de fond
+            task = bot.loop.create_task(send_loop(targets, msg_text, interval, chat_id))
+            active_tasks[chat_id] = task
 
-                await conv.send_message("📝 **Envoyez le MESSAGE** à diffuser :")
-                msg = (await conv.get_response()).text
-
-                await conv.send_message("⏱️ **Temps d'attente** (en secondes) entre chaque cycle :")
-                resp_t = await conv.get_response()
-                if not resp_t.text.isdigit():
-                    await conv.send_message("❌ Erreur: Chiffre requis.", buttons=get_main_menu())
-                    return
-                interval = int(resp_t.text)
-
-                await conv.send_message(f"🚀 **Lancement sur {len(targets)} groupes !**", buttons=get_main_menu())
-                
-                # Sauvegarde info et lancement
-                task_info[chat_id] = {'targets': targets}
-                task = bot.loop.create_task(send_loop(targets, msg, interval, chat_id))
-                active_tasks[chat_id] = task
-
-            except Exception as e:
-                await conv.send_message(f"❌ Erreur : {e}", buttons=get_main_menu())
-
-    # --- 🛑 BOUTON STOP ---
+    # --- 🛑 STOP ---
     elif data == b'stop':
         if chat_id in active_tasks:
             active_tasks[chat_id].cancel()
             del active_tasks[chat_id]
-            if chat_id in task_info: del task_info[chat_id]
-            await event.answer("Arrêt effectué !", alert=True)
-            await event.edit("🛑 **Diffusion ARRÊTÉE.**", buttons=get_main_menu())
+            await event.answer("Arrêt confirmé !", alert=True)
+            await event.edit("🛑 **Diffusion stoppée.**", buttons=get_main_menu())
         else:
-            await event.answer("Aucune tâche en cours.", alert=True)
+            await event.answer("Rien ne tourne actuellement.", alert=True)
 
 # ==========================================
-# 🔄 BOUCLE D'ENVOI (Back-end)
+# 🔄 LA BOUCLE D'ENVOI
 # ==========================================
 async def send_loop(targets, message, interval, chat_id):
     try:
@@ -227,26 +162,25 @@ async def send_loop(targets, message, interval, chat_id):
             for group in targets:
                 try:
                     await user_client.send_message(group, message)
-                    await asyncio.sleep(3) # Anti-flood pause
+                    # Pause de sécurité (3s) entre chaque envoi pour éviter le flood
+                    await asyncio.sleep(3)
                 except Exception as e:
                     print(f"Erreur envoi {group}: {e}")
             
+            # Pause avant le prochain cycle complet
             await asyncio.sleep(interval)
+            
     except asyncio.CancelledError:
-        pass
+        pass # Arrêt propre
     except Exception as e:
         if chat_id in active_tasks: del active_tasks[chat_id]
-        try: await bot.send_message(chat_id, f"❌ Erreur critique boucle : {e}")
-        except: pass
+        print(f"Erreur critique: {e}")
 
 # ==========================================
-# 🏁 MAIN
+# 🚀 MAIN
 # ==========================================
 async def main():
-    print(f"🔐 Bot à Boutons en ligne... (Pass: {BOT_PASSWORD})")
-    await bot.start(bot_token=BOT_TOKEN)
-    try: await user_client.connect()
-    except: pass
+    print("🤖 Bot démarré...")
     await bot.run_until_disconnected()
 
 if __name__ == '__main__':
