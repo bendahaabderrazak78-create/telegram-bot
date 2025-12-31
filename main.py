@@ -1,27 +1,37 @@
 import os
 import asyncio
 import threading
+import logging
 from flask import Flask
 from telethon import TelegramClient, events, Button, errors
 from telethon.sessions import StringSession
 
 # ==========================================
-# 🌐 SERVEUR WEB (POUR KOYEB/RENDER)
+# 📝 LOGGING (POUR VOIR LES ERREURS)
 # ==========================================
-# C'est cette partie qui corrige l'erreur "TCP health check failed"
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ==========================================
+# 🌐 SERVEUR WEB (KEEP ALIVE KOYEB)
+# ==========================================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Bot Telegram en ligne et actif !"
+    return "✅ Bot en ligne ! (Status: 200 OK)"
 
 def run_web_server():
-    # On écoute sur le port défini par Koyeb (ou 8000 par défaut)
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host='0.0.0.0', port=port)
+    # Koyeb utilise souvent le port 8080 par défaut
+    port = int(os.environ.get("PORT", 8080))
+    print(f"🌍 Serveur Web démarré sur le port {port}")
+    try:
+        app.run(host='0.0.0.0', port=port)
+    except Exception as e:
+        print(f"❌ Erreur Web Server: {e}")
 
 # ==========================================
-# ⚙️ CONFIGURATION TELETHON
+# ⚙️ CONFIGURATION
 # ==========================================
 API_ID = int(os.getenv("API_ID", 33041609))
 API_HASH = os.getenv("API_HASH", "5f731c160b3dd9465c4e75005633685e")
@@ -32,11 +42,19 @@ SAVED_SESSION = os.getenv("STRING_SESSION")
 # ==========================================
 # 🔌 INITIALISATION CLIENTS
 # ==========================================
+print("🔄 Initialisation des clients Telegram...")
 bot = TelegramClient('bot_session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
+user_client = None
 if SAVED_SESSION:
-    user_client = TelegramClient(StringSession(SAVED_SESSION), API_ID, API_HASH)
+    try:
+        user_client = TelegramClient(StringSession(SAVED_SESSION), API_ID, API_HASH)
+        print("✅ StringSession détectée.")
+    except Exception as e:
+        print(f"⚠️ Erreur StringSession (Session ignorée) : {e}")
+        user_client = TelegramClient(StringSession(), API_ID, API_HASH)
 else:
+    print("⚠️ Aucune StringSession trouvée. Mode temporaire.")
     user_client = TelegramClient(StringSession(), API_ID, API_HASH)
 
 active_tasks = {}
@@ -90,7 +108,12 @@ async def callback_handler(event):
     # --- LOGIN ---
     elif data == b'login':
         await event.answer()
-        if not user_client.is_connected(): await user_client.connect()
+        try:
+            if not user_client.is_connected(): await user_client.connect()
+        except Exception as e:
+            await event.respond(f"❌ Erreur connexion client: {e}", buttons=get_main_menu())
+            return
+
         if await user_client.is_user_authorized():
             await event.respond("✅ Déjà connecté !", buttons=get_main_menu())
             return
@@ -194,22 +217,25 @@ async def send_loop(targets, message, interval, chat_id):
         if chat_id in active_tasks: del active_tasks[chat_id]
 
 # ==========================================
-# 🚀 MAIN (AVEC WEB SERVER)
+# 🚀 MAIN (DÉMARRAGE ROBUSTE)
 # ==========================================
-async def main():
-    print("🤖 Démarrage du bot...")
-    
-    # 1. Lancer le serveur Web dans un thread séparé (pour Koyeb)
-    # Cela permet d'ouvrir le port 8000 sans bloquer le bot
-    print("🌍 Lancement du serveur Web de maintien...")
-    server_thread = threading.Thread(target=run_web_server)
-    server_thread.daemon = True
-    server_thread.start()
-
-    # 2. Lancer le Bot Telegram
-    print("✅ Bot Telegram en ligne !")
-    await bot.run_until_disconnected()
-
 if __name__ == '__main__':
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+    print("🚀 Démarrage du script...")
+    
+    # 1. Lancer le serveur Web (Thread)
+    try:
+        server_thread = threading.Thread(target=run_web_server)
+        server_thread.daemon = True
+        server_thread.start()
+        print("✅ Thread Web Server lancé.")
+    except Exception as e:
+        print(f"❌ Echec lancement Web Server: {e}")
+
+    # 2. Lancer la boucle principale Telegram
+    try:
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(bot.run_until_disconnected())
+    except KeyboardInterrupt:
+        print("🛑 Arrêt manuel.")
+    except Exception as e:
+        print(f"❌ CRASH DU BOT : {e}")
